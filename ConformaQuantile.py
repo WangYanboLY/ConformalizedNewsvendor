@@ -48,13 +48,11 @@ import numpy as np
 def predict_kernel_quantile(X, Y, X_new, quantile, epsilon=1e-5):
     n = len(X)
     kernel_weights = np.array([kernel_function(X_new, X[i]) for i in range(n)])
-    print(n)
     low, high = min(Y), max(Y)
     
     while high - low > epsilon:
         mid = (high + low) / 2
         indicator_sum = sum(kernel_weights[i] * (Y[i] <= mid) for i in range(n))
-        
         if indicator_sum / sum(kernel_weights) < quantile:
             low = mid
         else:
@@ -93,13 +91,14 @@ def perform_regression_analysis(X, Y, train_ratio, test_ratio, validation_ratio,
         Y_pred_test = nn_model(X_test).detach().numpy().flatten()
         Y_pred_validation = nn_model(X_validation).detach().numpy().flatten()
     elif model_type == 'ko':
-        print("1")
-        Y_pred_test = np.array([predict_kernel_quantile(X, Y, x, quantile) for x in X_test])
-        Y_pred_validation = np.array([predict_kernel_quantile(X, Y, x, quantile) for x in X_validation])
+        Y_pred_test = np.array([predict_kernel_quantile(X_train, Y_train, x, quantile) for x in X_test])
+        Y_pred_validation = np.array([predict_kernel_quantile(X_train, Y_train, x, quantile) for x in X_validation])
     elif model_type == 'quantile_net':
         model = train_quantile_network(X_train, Y_train, quantile, n_features)
-        Y_pred_test = model.predict(X_test)
-        Y_pred_validation = model.predict(X_validation)
+        X_test = torch.tensor(X_test, dtype=torch.float32)
+        X_validation = torch.tensor(X_validation, dtype=torch.float32)
+        Y_pred_test = model(X_test).detach().numpy().flatten()
+        Y_pred_validation = model(X_validation).detach().numpy().flatten()
     else:
         raise ValueError("Invalid model type provided.")
 
@@ -147,16 +146,95 @@ def train_quantile_network(X_train, Y_train, quantile, n_features):
     X_train = torch.tensor(X_train, dtype=torch.float32)
     Y_train = torch.tensor(Y_train, dtype=torch.float32).view(-1, 1)
 
-    # Neural network
-    model = tf.keras.Sequential([
-        layers.Dense(30, activation='relu', input_shape=(n_features,)),
-        layers.Dense(1)
-    ])
-    model.compile(optimizer='adam', loss=lambda y_true, y_pred: quantile_loss(quantile, y_true, y_pred))
-    model.fit(X_train, Y_train, epochs = 100, batch_size=32, verbose=1)
+    model = nn.Sequential(
+        nn.Linear(n_features, 30),
+        nn.ReLU(),
+        nn.Linear(30, 1)
+    )
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
+    epochs = 1000
+
+    for epoch in range(epochs):
+        optimizer.zero_grad()
+        outputs = model(X_train)
+        loss = quantile_loss_neural_net(quantile, Y_train, outputs)
+        loss.backward()
+        optimizer.step()
 
     return model
+def quantile_loss_neural_net(quantile, Y_train, outputs):
+    errors = Y_train - outputs
+    return torch.max((quantile - 1) * errors, quantile * errors).mean()
+
 
 def quantile_loss(y_true, y_pred, quantile):
     error = y_true - y_pred
     return np.maximum(quantile * error, (quantile - 1) * error).mean()
+
+
+
+
+def perform_jackknife_plus(X, Y, validation_ratio, quantile, model_type):
+# Splitting the dataset into training and validation sets
+    if model_type in ['linear', 'lasso', 'ridge', 'quantile', 'glm']:
+        X = sm.add_constant(X)
+    X_train, X_validation, Y_train, Y_validation = train_test_split(X, Y, test_size=validation_ratio, random_state=0)
+
+    # Initialize lists to store predictions and adjustments
+    predictions = []
+    adjustments = []
+
+    # Loop over all data points in the training set
+    for i in range(len(X_train)):
+        # Create a training set excluding the current data point
+        X_train_i = np.delete(X_train, i, axis=0)
+        Y_train_i = np.delete(Y_train, i, axis=0)
+
+        # Train the model on this modified training set
+        model_i = train_model(X_train_i, Y_train_i, model_type, quantile)
+
+        # Predict for the left-out data point and for the new data point in validation set
+        Y_pred_left_out = model_i.predict(X_train[i].reshape(1, -1))
+        Y_pred_validation = model_i.predict(X_validation)
+
+        # Calculate the adjustment for the left-out data point
+        adjustment = Y_train[i] - Y_pred_left_out
+
+        # Store predictions and adjustments
+        predictions.append(Y_pred_validation)
+        adjustments.append(adjustment)
+
+    # Compute final adjusted predictions
+    predictions = np.array(predictions)
+    adjustments = np.array(adjustments)
+    adjusted_predictions = np.quantile(predictions + adjustments, quantile, axis=0)
+
+    # Compute loss on validation set
+    loss = quantile_loss(Y_validation, adjusted_predictions, quantile)
+
+    print(model_type, "jackknife+ loss", loss)
+    return loss
+
+def train_model(X, Y, model_type, quantile):
+    # Preprocessing for models that require adding a constant
+
+    # Training the model based on the specified type
+    if model_type == 'linear':
+        model = LinearRegression().fit(X, Y)
+    elif model_type == 'lasso':
+        model = Lasso(alpha=0.1).fit(X, Y)
+    elif model_type == 'ridge':
+        model = Ridge(alpha=1.0).fit(X, Y)
+    elif model_type == 'quantile':
+        model = sm.QuantReg(Y, X).fit(q=quantile)
+    elif model_type == 'random_forest':
+        model = RandomForestRegressor(random_state=0).fit(X, Y)
+    elif model_type == 'glm':
+        model = sm.GLM(Y, X, family=sm.families.Gaussian()).fit()
+    elif model_type == 'neural_network':
+        # Assuming `train_neural_network` is a function defined elsewhere to train a neural network
+        model = train_neural_network(X, Y)
+    else:
+        raise ValueError("Invalid model type provided.")
+    
+    return model
