@@ -73,7 +73,7 @@ def calculate_kappa_in(X, Y, quantile, model_type, quantile_real):
     elif model_type == 'quantile':
         model = sm.QuantReg(Y, X).fit(q=quantile)
     elif model_type == 'ko':
-        Y_pred = np.array([predict_kernel_quantile(X, Y, x, quantile) for x in X_test])
+        Y_pred = np.array([predict_kernel_quantile(X, Y, x, quantile) for x in X])
     elif model_type == 'quantile_net':
         model = train_quantile_network(X, Y, quantile, n_features)
         X = torch.tensor(X, dtype=torch.float32)
@@ -95,7 +95,45 @@ def calculate_kappa_in(X, Y, quantile, model_type, quantile_real):
         for j in range(n):
             kappa.append(np.abs(bias[i] - bias[j]))
             d.append(np.linalg.norm(X[i] - X[j]))
-    return kappa, d
+    return kappa, d, bias, Y_pred
+
+def calculate_kappa_ext(X, Y, quantile, ratio, model_type, quantile_real):
+    n_features = X.shape[1]
+
+    X_train, X_test, Y_train, Y_test, quantile_train, quantile_test= train_test_split(X, Y, quantile_real, test_size=1 - ratio,
+                                                        random_state=0)
+    if model_type in ['linear', 'lasso', 'ridge', 'quantile', 'glm']:
+        X_train = sm.add_constant(X_train)
+        X_test = sm.add_constant(X_test)
+
+    if model_type == 'linear':
+        model = LinearRegression().fit(X_train, Y_train)  
+    elif model_type == 'quantile':
+        model = sm.QuantReg(Y_train, X_train).fit(q=quantile)
+    elif model_type == 'ko':
+        Y_pred = np.array([predict_kernel_quantile(X_train, Y_train, x, quantile) for x in X_test])
+    elif model_type == 'quantile_net':
+        model = train_quantile_network(X_train, Y_train, quantile, n_features)
+        X_test= torch.tensor(X_test, dtype=torch.float32)
+        Y_pred = model(X_test).detach().numpy().flatten()
+    else:
+        raise ValueError("Invalid model type provided.")
+
+    # Predicting and calculating errors
+    if model_type not in ['neural_network', 'ko', 'quantile_net']:
+        Y_pred = model.predict(X_test)
+    n = quantile_test.shape[0]
+    bias = []
+    kappa = []
+    d = []
+    for i in range(n):
+        bias.append(Y_pred[i] - quantile_test[i])
+
+    for i in range(n):
+        for j in range(n):
+            kappa.append(np.abs(bias[i] - bias[j]))
+            d.append(np.linalg.norm(X_test[i] - X_test[j]))
+    return kappa, d, bias
 
 def train_neural_network(X_train, Y_train):
     # Convert to torch tensors
